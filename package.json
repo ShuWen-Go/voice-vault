@@ -1,0 +1,13 @@
+{
+  "name": "voice-vault",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "听藏 · 会议录音 → 转写 → 结构化纪要（转写在本地完成）",
+  "scripts": {
+    "start": "node app/server.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

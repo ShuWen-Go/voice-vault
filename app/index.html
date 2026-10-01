@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>听藏 · 音频输入</title>
+<style>
+  :root { --red: #C00000; --red-dark: #7A0000; --red-bg: #FCEBEB; --ink: #2C2C2A; --muted: #5F5E5A; --line: #E3E1DA; }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 32px 20px 64px; background: #FAFAF8; color: var(--ink);
+         font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; line-height: 1.6; }
+  .wrap { max-width: 760px; margin: 0 auto; }
+  h1 { font-size: 22px; font-weight: 500; margin: 0 0 6px; }
+  h1 span { color: var(--red); }
+  .sub { color: var(--muted); font-size: 14px; margin: 0 0 28px; }
+  .card { background: #fff; border: 1px solid var(--line); border-radius: 12px; padding: 20px; margin-bottom: 18px; }
+  h2 { font-size: 15px; font-weight: 500; margin: 0 0 14px; }
+  h2 em { font-style: normal; color: var(--muted); font-weight: 400; font-size: 13px; margin-left: 8px; }
+  button { font: inherit; border: 1px solid var(--red); background: var(--red); color: #fff;
+           border-radius: 8px; padding: 9px 18px; cursor: pointer; }
+  button:hover { background: var(--red-dark); border-color: var(--red-dark); }
+  button.ghost { background: #fff; color: var(--red); }
+  button.ghost:hover { background: var(--red-bg); }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  .row { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+  .timer { font-variant-numeric: tabular-nums; font-size: 20px; color: var(--muted); }
+  .timer.on { color: var(--red); }
+  .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: #C9C7C0; margin-right: 7px; }
+  .dot.on { background: var(--red); }
+  #drop { border: 1.5px dashed #CFCDC6; border-radius: 10px; padding: 26px; text-align: center;
+          color: var(--muted); font-size: 14px; cursor: pointer; transition: .15s; }
+  #drop.hot { border-color: var(--red); background: var(--red-bg); color: var(--red); }
+  .bar { height: 6px; background: #EFEDE6; border-radius: 3px; overflow: hidden; margin-top: 14px; display: none; }
+  .bar i { display: block; height: 100%; width: 0; background: var(--red); transition: width .12s; }
+  .msg { margin-top: 14px; font-size: 13.5px; padding: 11px 13px; border-radius: 8px;
+         background: var(--red-bg); color: var(--red-dark); display: none; white-space: pre-wrap; }
+  .msg.err { background: #FDF1F1; border: 1px solid #F0C4C4; color: #8A1F1F; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 9px 8px; border-bottom: 1px solid var(--line); }
+  th { color: var(--muted); font-weight: 400; font-size: 12.5px; }
+  td.num { font-variant-numeric: tabular-nums; }
+  code { font-family: ui-monospace, Consolas, monospace; font-size: 12.5px; background: #F4F2EC; padding: 1px 5px; border-radius: 4px; }
+  .empty { color: #A9A79F; font-size: 13.5px; padding: 10px 0; }
+  .foot { color: #A9A79F; font-size: 12.5px; margin-top: 24px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>听<span>藏</span> · 音频输入</h1>
+  <p class="sub">把会议录音交进来 —— 现场录，或上传已有文件。转写在本地完成（尚未接入，当前为 D2 阶段）。</p>
+
+  <div class="card">
+    <h2>现场录音 <em>浏览器 MediaRecorder，默认输出 webm/opus</em></h2>
+    <div class="row">
+      <button id="recBtn">开始录音</button>
+      <span class="timer" id="timer"><span class="dot" id="dot"></span><span id="clock">00:00</span></span>
+    </div>
+    <div class="bar" id="recBar"><i id="recBarIn"></i></div>
+    <div class="msg" id="recMsg"></div>
+  </div>
+
+  <div class="card">
+    <h2>上传音频 <em>点选或直接把文件拖进来</em></h2>
+    <div id="drop">把音频文件拖到这里（.m4a / .mp3 / .wav / .webm / .mp4 …）</div>
+    <input type="file" id="fileInput" accept="audio/*,video/mp4" hidden>
+    <div class="bar" id="upBar"><i id="upBarIn"></i></div>
+    <div class="msg" id="upMsg"></div>
+  </div>
+
+  <div class="card">
+    <h2>已收到的音频 <em id="countHint"></em>
+      <button class="ghost" id="refresh" style="float:right;margin-top:-6px">刷新</button>
+    </h2>
+    <div id="list"><div class="empty">还没有音频 —— 录一段或传一个试试。</div></div>
+  </div>
+
+  <p class="foot">上传方式：raw body + <code>X-Filename</code> 请求头 ｜ 落盘：<code>data/audio/&lt;sha256前12位&gt;.&lt;ext&gt;</code>（同一文件重复上传只存一份）</p>
+</div>
+
+<script>
+// ===================== 小工具 =====================
+function $(id) { return document.getElementById(id); }
+function fmtSize(bytes) {
+  if (bytes >= 1024 * 1024) return (bytes / 1024 / 1024).toFixed(2) + ' MB';
+  return (bytes / 1024).toFixed(1) + ' KB';
+}
+function fmtClock(ms) {
+  const s = Math.floor(ms / 1000);
+  return String(Math.floor(s / 60)).padStart(2, '0') + ':' + String(s % 60).padStart(2, '0');
+}
+function fmtTime(iso) {
+  const d = new Date(iso);
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+function showMsg(el, text, isErr) {
+  el.textContent = text;
+  el.className = 'msg' + (isErr ? ' err' : '');
+  el.style.display = 'block';
+}
+function setBar(barId, inId, ratio) {
+  if (ratio == null) { $(barId).style.display = 'none'; return; }
+  $(barId).style.display = 'block';
+  $(inId).style.width = (ratio * 100).toFixed(1) + '%';
+}
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+// ===================== 上传核心（用 XHR：fetch 拿不到上传进度） =====================
+function uploadBlob(blob, filename, onProgress) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', '/api/audio');
+    // 告诉服务端音频类型（它靠这个推断后缀）
+    xhr.setRequestHeader('Content-Type', blob.type || 'application/octet-stream');
+    // 文件名放请求头；HTTP 头不能直接带中文，先编码，服务端再解
+    xhr.setRequestHeader('X-Filename', encodeURIComponent(filename));
+    xhr.upload.onprogress = (e) => { if (e.lengthComputable) onProgress(e.loaded / e.total); };
+    xhr.onload = () => {
+      let data = null;
+      try { data = JSON.parse(xhr.responseText); } catch (e) { /* 下面统一兜 */ }
+      if (xhr.status === 200 && data) resolve(data);
+      else reject(new Error((data && data.error) || ('上传失败：HTTP ' + xhr.status)));
+    };
+    xhr.onerror = () => reject(new Error('网络错误，上传中断'));
+    xhr.send(blob);
+  });
+}
+
+// ===================== 1. 现场录音 =====================
+const recBtn = $('recBtn'), timerEl = $('timer'), dotEl = $('dot'), clockEl = $('clock'), recMsg = $('recMsg');
+let recorder = null, chunks = [], tick = null, startedAt = 0;
+
+async function uploadAndReport(blob, name, barIds, msgEl, warnPrefix) {
+  try {
+    const r = await uploadBlob(blob, name, (p) => setBar(barIds[0], barIds[1], p));
+    showMsg(msgEl, `${warnPrefix}✅ 已入库 ${r.hash}${r.ext}\n大小 ${r.sizeMB} MB ｜ ` +
+      (r.existed ? '哈希命中：磁盘上早就有这份（未重复写）' : '新文件已写入'));
+    refreshList();
+  } catch (err) {
+    showMsg(msgEl, '❌ ' + err.message, true);
+  } finally {
+    setTimeout(() => setBar(barIds[0], barIds[1], null), 700);
+  }
+}
+
+recBtn.addEventListener('click', async () => {
+  if (recorder && recorder.state === 'recording') { recorder.stop(); return; }
+
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (err) {
+    showMsg(recMsg, '❌ 拿不到麦克风权限：' + err.message, true);
+    return;
+  }
+
+  const prefer = 'audio/webm;codecs=opus';
+  const opts = MediaRecorder.isTypeSupported(prefer) ? { mimeType: prefer } : undefined;
+  recorder = new MediaRecorder(stream, opts);
+  chunks = [];
+  recorder.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
+
+  recorder.onstop = async () => {
+    stream.getTracks().forEach((t) => t.stop());
+    clearInterval(tick);
+    recBtn.textContent = '开始录音';
+    dotEl.classList.remove('on');
+    timerEl.classList.remove('on');
+    clockEl.textContent = '00:00';
+
+    const type = recorder.mimeType || 'audio/webm';
+    const blob = new Blob(chunks, { type });
+    const ext = type.includes('webm') ? 'webm' : (type.includes('mp4') ? 'm4a' : 'bin');
+    const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+    await uploadAndReport(blob, `录音-${stamp}.${ext}`, ['recBar', 'recBarIn'], recMsg, `录制完成 ${fmtSize(blob.size)}，已上传\n`);
+  };
+
+  recorder.start();
+  startedAt = Date.now();
+  recBtn.textContent = '停止并上传';
+  dotEl.classList.add('on');
+  timerEl.classList.add('on');
+  clockEl.textContent = '00:00';
+  tick = setInterval(() => { clockEl.textContent = fmtClock(Date.now() - startedAt); }, 200);
+  showMsg(recMsg, '正在录音…说完点「停止并上传」');
+});
+
+// ===================== 2. 文件上传（点选 + 拖拽） =====================
+const drop = $('drop'), fileInput = $('fileInput'), upMsg = $('upMsg');
+
+function handleFile(file) {
+  if (!file) return;
+  showMsg(upMsg, `准备上传：${file.name}（${fmtSize(file.size)}）`);
+  uploadAndReport(file, file.name, ['upBar', 'upBarIn'], upMsg, '');
+}
+drop.addEventListener('click', () => fileInput.click());
+fileInput.addEventListener('change', () => { handleFile(fileInput.files[0]); fileInput.value = ''; });
+['dragenter', 'dragover'].forEach((ev) => drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.add('hot'); }));
+['dragleave', 'drop'].forEach((ev) => drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.remove('hot'); }));
+drop.addEventListener('drop', (e) => handleFile(e.dataTransfer.files[0]));
+
+// ===================== 3. 已收清单 =====================
+async function refreshList() {
+  const listEl = $('list'), countHint = $('countHint');
+  try {
+    const data = await (await fetch('/api/audios')).json();
+    countHint.textContent = `共 ${data.count} 份`;
+    if (!data.items.length) {
+      listEl.innerHTML = '<div class="empty">还没有音频 —— 录一段或传一个试试。</div>';
+      return;
+    }
+    const rows = data.items.map((it) => `<tr>
+        <td>${escapeHtml(it.filename)}</td>
+        <td><code>${it.hash}${it.ext}</code></td>
+        <td class="num">${fmtSize(it.bytes)}</td>
+        <td class="num">${fmtTime(it.uploadedAt)}</td>
+        <td>${it.onDisk ? '✅ 在盘上' : '⚠️ 文件缺失'}</td>
+      </tr>`).join('');
+    listEl.innerHTML = `<table>
+        <thead><tr><th>原文件名</th><th>落盘名</th><th>大小</th><th>上传时间</th><th>磁盘</th></tr></thead>
+        <tbody>${rows}</tbody></table>`;
+  } catch (err) {
+    listEl.innerHTML = '<div class="empty">清单读取失败：' + escapeHtml(err.message) + '</div>';
+  }
+}
+$('refresh').addEventListener('click', refreshList);
+refreshList();
+</script>
+</body>
+</html>
