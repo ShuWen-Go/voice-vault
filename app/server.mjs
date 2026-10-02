@@ -89,6 +89,46 @@ function sendJsonClose(req, res, statusCode, body) {
   console.log(`${req.method} ${req.url} ${statusCode}`);
 }
 
+// ========== 上云加固 ①：访问控制 ==========
+// 只在配置了 VV_ACCESS_TOKEN 时启用（本地留空 ⇒ 免登录，开发无感）。
+// 用 HTTP Basic：浏览器原生弹框，且 <audio> / fetch 的**同源请求都会自动带凭据** ⇒ 零前端改动。
+// 口令就是密码部分，用户名随便填。
+function checkAuth(req, res) {
+  const token = config.accessToken;
+  if (!token) return true;
+  const hdr = String(req.headers.authorization || '');
+  if (hdr.startsWith('Basic ')) {
+    try {
+      const raw = Buffer.from(hdr.slice(6), 'base64').toString('utf8');
+      const pass = raw.includes(':') ? raw.slice(raw.indexOf(':') + 1) : raw;
+      if (pass === token) return true;
+    } catch { /* 解不开就当没带凭据 */ }
+  }
+  res.writeHead(401, {
+    'WWW-Authenticate': 'Basic realm="voice-vault", charset="UTF-8"',
+    'Content-Type': 'text/plain; charset=utf-8',
+  });
+  res.end('需要访问口令');
+  return false;
+}
+
+// ========== 上云加固 ②：限流 ==========
+// ⚠️ 必须是「全局」计数，不能按 IP —— 反代之后 clientIp 每个请求都可能不同，
+// per-IP 计数会直接失效（链藏 W4 实测过的坑）。只拦花钱 / 吃 CPU 的提交类接口。
+const rateWindow = [];
+function rateLimited(req, res) {
+  const limit = config.rateLimitPerMin;
+  if (!limit) return false;
+  const now = Date.now();
+  while (rateWindow.length && now - rateWindow[0] > 60000) rateWindow.shift();
+  if (rateWindow.length >= limit) {
+    sendJson(req, res, 429, { error: `请求太频繁，请稍后再试（每分钟最多 ${limit} 次）` });
+    return true;
+  }
+  rateWindow.push(now);
+  return false;
+}
+
 // 统一的文本/二进制响应 + 一行访问日志
 function sendRaw(req, res, statusCode, contentType, body) {
   res.writeHead(statusCode, { 'Content-Type': contentType });
@@ -450,7 +490,16 @@ function handleTranscriptList(req, res) {
 
 // ========== 服务器：按方法和路径分流 ==========
 const server = http.createServer((req, res) => {
+  // 0) 访问控制：仅当配置了 VV_ACCESS_TOKEN 才启用（本地留空 = 免登录）
+  if (!checkAuth(req, res)) return;
+
   const pathname = (req.url ?? '/').split('?')[0];
+
+  // 0.1) 限流：只拦「花钱 / 吃 CPU」的提交类接口 —— 轮询查询接口绝不拦（前端每 2 秒问一次）
+  if (req.method === 'POST' &&
+      (pathname === '/api/structure' || pathname === '/api/transcribe' || pathname === '/api/audio')) {
+    if (rateLimited(req, res)) return;
+  }
 
   // D2 音频上传：只接受 POST
   if (pathname === '/api/audio') {

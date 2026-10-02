@@ -51,8 +51,16 @@ export const config = {
   maxConcurrency: Math.max(1, Number(pick('VV_MAX_CONCURRENCY', '1')) || 1),
   // 服务端口
   port: Number(pick('PORT', '3000')) || 3000,
-  // 数据目录
-  dataDir: path.join(repoRoot, 'data'),
+  // 数据目录。默认项目内 data/。
+  // ⚠️ 本地开发强烈建议用 .env 的 VV_DATA_DIR 指到**项目外**：
+  //   发布是「打包整个磁盘目录」，而 .gitignore 只管 git、管不了上传包 ——
+  //   真实录音放在项目里，就会被一起传上云。
+  //   项目内的 data/ 则留给「可公开的演示数据」（它本来就该随包上云）。
+  dataDir: pick('VV_DATA_DIR', '') || path.join(repoRoot, 'data'),
+  // 访问口令：**配置了才启用**（本地留空 = 免登录，开发无感）
+  accessToken: pick('VV_ACCESS_TOKEN', ''),
+  // 全局限流：每分钟最多几次「花钱/吃 CPU」的提交。0 = 不限
+  rateLimitPerMin: Math.max(0, Number(pick('VV_RATE_LIMIT_PER_MIN', '0')) || 0),
   // DeepSeek 密钥 —— 只活在服务端；前端永远拿不到（W2 结论：Key 只在服务端）
   deepseekKey: pick('DEEPSEEK_API_KEY', ''),
 };
