@@ -91,24 +91,51 @@ function sendJsonClose(req, res, statusCode, body) {
 
 // ========== 上云加固 ①：访问控制 ==========
 // 只在配置了 VV_ACCESS_TOKEN 时启用（本地留空 ⇒ 免登录，开发无感）。
-// 用 HTTP Basic：浏览器原生弹框，且 <audio> / fetch 的**同源请求都会自动带凭据** ⇒ 零前端改动。
-// 口令就是密码部分，用户名随便填。
+//
+// 三条携带通道，按可靠性排序：
+//   ① Cookie `vv_token`    —— 浏览器主路径：用带口令的链接进一次，服务种 Cookie，之后自动带
+//   ② 请求头 `X-VV-Token`  —— 脚本 / API 调用
+//   ③ URL 查询 `?token=`   —— 入口（同时也是种 Cookie 的地方）
+//
+// ⚠️ 为什么**不用 HTTP Basic 当主路径**：实测发现云端网关会把 `Authorization` 头**剥掉**，
+//    于是带凭据也一律 401（本地直连却完全正常）—— 典型的「本地过 ≠ 云端过」，
+//    而且只有真发到云上才暴露得出来。
 function checkAuth(req, res) {
   const token = config.accessToken;
   if (!token) return true;
-  const hdr = String(req.headers.authorization || '');
-  if (hdr.startsWith('Basic ')) {
-    try {
-      const raw = Buffer.from(hdr.slice(6), 'base64').toString('utf8');
-      const pass = raw.includes(':') ? raw.slice(raw.indexOf(':') + 1) : raw;
-      if (pass === token) return true;
-    } catch { /* 解不开就当没带凭据 */ }
+
+  // ① 自定义请求头（不会被网关当认证头处理）
+  if (req.headers['x-vv-token'] === token) return true;
+
+  // ② Cookie
+  const ck = /(?:^|;\s*)vv_token=([^;]*)/.exec(String(req.headers.cookie || ''));
+  if (ck) {
+    try { if (decodeURIComponent(ck[1]) === token) return true; } catch { /* 畸形 cookie 忽略 */ }
   }
-  res.writeHead(401, {
-    'WWW-Authenticate': 'Basic realm="voice-vault", charset="UTF-8"',
-    'Content-Type': 'text/plain; charset=utf-8',
-  });
-  res.end('需要访问口令');
+
+  // ③ 查询参数：通过就种 Cookie；页面请求再 302 一次，把口令从地址栏抹掉
+  let url = null;
+  try { url = new URL(req.url, 'http://localhost'); } catch { /* 畸形 URL，忽略 */ }
+  if (url && url.searchParams.get('token') === token) {
+    const cookie = `vv_token=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000`;
+    const wantsHtml = String(req.headers.accept || '').includes('text/html');
+    if (wantsHtml) {
+      url.searchParams.delete('token');
+      const qs = url.searchParams.toString();
+      res.writeHead(302, { 'Set-Cookie': cookie, Location: url.pathname + (qs ? '?' + qs : '') });
+      res.end();
+    } else {
+      res.setHeader('Set-Cookie', cookie); // 之后的同源请求会自动带上
+      return true;
+    }
+    return false;
+  }
+
+  // 未通过：给一个能看懂的提示页，而不是裸 401
+  res.writeHead(401, { 'Content-Type': 'text/html; charset=utf-8' });
+  res.end('<meta charset="utf-8"><div style="font-family:system-ui;padding:48px;line-height:1.9;color:#2C2C2A">' +
+    '<h2>需要访问口令</h2><p>请用带口令的链接打开，例如：</p>' +
+    '<p><code>?token=你的口令</code></p><p style="color:#888">通过后浏览器会记住，不用每次输入。</p></div>');
   return false;
 }
 
