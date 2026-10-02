@@ -49,6 +49,17 @@ export function createTranscriber() {
     return n;
   }
 
+  // 任务表只增不减会一直长肉 —— 腾手清掉老的「已结束」任务（保留最近 MAX_TASKS 条）
+  const MAX_TASKS = 200;
+  function gc() {
+    if (tasks.size <= MAX_TASKS) return;
+    for (const [id, t] of tasks) {
+      if (tasks.size <= MAX_TASKS) break;
+      if (t.status === 'running' || t.status === 'queued' || t.child) continue;
+      tasks.delete(id);
+    }
+  }
+
   // 调度：有空位就从队列里放一个出来跑
   function pump() {
     while (queue.length && runningCount() < config.maxConcurrency) {
@@ -56,6 +67,7 @@ export function createTranscriber() {
       const t = tasks.get(id);
       if (t && t.status === 'queued') start(t);
     }
+    gc();
   }
 
   // 把 Python 打上来的事件合并进任务状态

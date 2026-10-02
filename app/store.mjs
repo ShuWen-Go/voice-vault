@@ -168,10 +168,12 @@ export function createStore() {
       try {
         if (fs.existsSync(p)) {
           fs.unlinkSync(p);
-          removed.push(path.basename(p));
+          // 返回带目录的相对路径：transcripts/<hash>.json 与 notes/<hash>.json 同名，
+          // 只给 basename 会让人以为"删了两个同名文件"
+          removed.push(path.relative(config.dataDir, p).split(path.sep).join('/'));
         }
       } catch (err) {
-        return { hash, error: `删除失败 ${path.basename(p)}：${err.message}`, removed };
+        return { hash, error: `删除失败 ${path.relative(config.dataDir, p)}：${err.message}`, removed };
       }
     }
 

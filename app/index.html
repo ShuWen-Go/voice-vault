@@ -82,6 +82,28 @@
   table.nums th, table.nums td { text-align:left; padding:7px 8px; border-bottom:1px solid var(--line); }
   table.nums th { color:var(--muted); font-weight:400; font-size:12.5px; }
   .foot { color:#A9A79F; font-size:12.5px; margin-top:22px; }
+
+  /* ===== 音频回放 / 可点时间戳 / 原文对照 ===== */
+  #playerCard { padding:11px 14px; }
+  #player { width:100%; display:block; }
+  button.at { font-family:ui-monospace,Consolas,monospace; font-size:12px; color:#A9A79F; background:none;
+              border:none; padding:1px 4px; margin-left:7px; cursor:pointer; border-radius:4px; }
+  button.at:hover { color:var(--red); background:var(--red-bg); }
+  button.at.play { color:var(--red); background:var(--red-bg); }
+  details.fold { background:#fff; border:1px solid var(--line); border-radius:12px; padding:13px 18px; margin-bottom:14px; }
+  details.fold summary { cursor:pointer; font-size:14px; font-weight:500; color:var(--red-dark); }
+  details.fold[open] summary { margin-bottom:9px; }
+  .seg { font-size:13.5px; padding:4px 0; border-bottom:1px dashed #F0EEE7; }
+  .seg:last-child { border-bottom:none; }
+  .fix { font-size:12px; color:#A9A79F; text-decoration:line-through; margin-left:6px; }
+  .warnline { font-size:13px; color:#8A1F1F; padding:3px 0; }
+  li.todo { cursor:default; }
+  li.todo.done { color:#A9A79F; }
+  li.todo.done .what { text-decoration:line-through; }
+  .tick { cursor:pointer; user-select:none; position:relative; }
+  .tick.on { background:var(--red); border-color:var(--red); }
+  .tick.on:after { content:"✓"; color:#fff; font-size:10px; line-height:13px; text-align:center;
+                   position:absolute; inset:0; }
 </style>
 </head>
 <body>
@@ -145,6 +167,9 @@
       <h2 id="dTitle"></h2>
       <p class="meta" id="dMeta"></p>
       <p class="verify" id="dVerify"></p>
+    </div>
+    <div class="card" id="playerCard" hidden>
+      <audio id="player" controls preload="metadata"></audio>
     </div>
     <div id="dNote"></div>
   </section>
@@ -285,7 +310,8 @@ async function pollTask(id, onTick) {
     if (t.status === 'done') return t;
     if (t.status === 'failed') throw new Error(t.error || '转写失败');
     if (t.status === 'canceled') throw new Error('已取消');
-    await sleep(2000);
+    // 前几次快查：短音频常在一秒内就绪，固定 2 秒会白等；之后放宽，别把服务端问烦
+    await sleep(i < 5 ? 600 : 2000);
   }
   throw new Error('等待时间过长，已停止轮询（服务端可能仍在跑）');
 }
@@ -416,59 +442,174 @@ async function openDetail(hash) {
         ' ｜ 数字存疑 ' + (vs.inventedNumbers || 0) + ' 处 ｜ 负责人为推测 ' + (vs.inferredOwners || 0) + ' 处'
       : '';
 
-    $('dNote').innerHTML = renderNote(rec);
+    // 音频回放：有音频文件才显示播放器 —— 时间戳能不能点，取决于这一条
+    const player = $('player');
+    if (rec.audioOnDisk) {
+      $('playerCard').hidden = false;
+      player.src = '/api/audio/' + hash;
+    } else {
+      $('playerCard').hidden = true;
+      player.removeAttribute('src');
+      player.load();
+    }
+
+    const seekable = !!rec.audioOnDisk;
+    $('dNote').innerHTML = renderNote(rec, seekable);
+    bindDetail(hash);
   } catch (err) {
     $('dNote').innerHTML = '<div class="card empty">加载失败：' + esc(err.message) + '</div>';
   }
 }
 
-function renderNote(rec) {
+// mm:ss → 秒（认不出来返回 null：宁可不跳，也不跳错位置）
+function parseMmSs(at) {
+  const m = String(at || '').trim().match(/^(?:(\d+):)?(\d{1,2}):(\d{2})$/);
+  if (!m) return null;
+  return (m[1] ? Number(m[1]) * 3600 : 0) + Number(m[2]) * 60 + Number(m[3]);
+}
+// 时间戳：有音频就渲染成「可点」，点了跳过去听
+function atHtml(at, seekable) {
+  if (!at) return '';
+  const sec = parseMmSs(at);
+  if (seekable && sec != null) return '<button class="at" data-seek="' + sec + '">' + esc(at) + '</button>';
+  return '<span class="at">' + esc(at) + '</span>';
+}
+
+function renderNote(rec, seekable) {
   const det = rec.noteDetail;
-  if (!det || !det.note) {
-    return '<div class="card empty">这份记录还没有纪要。<br>点右上「重新生成」试试。</div>';
-  }
-  const n = det.note;
-  const titles = rec.blockTitles || {};
-  const order = rec.blockOrder || ['keyPoints', 'todos', 'decisions', 'numbers', 'openQuestions', 'risks'];
   const parts = [];
 
-  if (n.summary) {
-    parts.push('<div class="card"><h3>30 秒速览</h3><p style="margin:0;font-size:13.5px">' + esc(n.summary) + '</p></div>');
+  if (det && det.note) {
+    const n = det.note;
+    const titles = rec.blockTitles || {};
+    const order = rec.blockOrder || ['keyPoints', 'todos', 'decisions', 'numbers', 'openQuestions', 'risks'];
+
+    if (n.summary) {
+      parts.push('<div class="card"><h3>30 秒速览</h3><p style="margin:0;font-size:13.5px">' + esc(n.summary) + '</p></div>');
+    }
+    for (const key of order) {
+      const body = renderBlock(key, n, seekable);
+      if (body) parts.push('<div class="card"><h3>' + esc(titles[key] || key) + '</h3>' + body + '</div>');
+    }
+    const vd = renderVerifyDetail(det.verify);
+    if (vd) parts.push(vd);
+  } else {
+    parts.push('<div class="card empty">这份记录还没有纪要。<br>点右上「重新生成」试试。</div>');
   }
-  for (const key of order) {
-    const body = renderBlock(key, n);
-    if (body) parts.push('<div class="card"><h3>' + esc(titles[key] || key) + '</h3>' + body + '</div>');
-  }
-  parts.push('<p class="foot">每条内容都标注了对应的录音位置（mm:ss）｜ 结论类字段由 AI 归纳，建议核对</p>');
+
+  const tr = renderTranscript(rec, seekable);
+  if (tr) parts.push(tr);
+
+  // 可核验的已核过；归纳类内容核不了 —— 这两句要一起出现，别只报喜
+  parts.push('<p class="foot">每条内容都标注了对应的录音位置（mm:ss）' +
+    (seekable ? '，点时间戳可直接跳过去听' : '') + ' ｜ 结论类字段由 AI 归纳，建议核对</p>');
   return parts.join('');
 }
 
-function renderBlock(key, n) {
+// 核验明细：全通过时只说一句，不制造噪音；有问题才展开列出来
+function renderVerifyDetail(verify) {
+  if (!verify) return '';
+  const badAt = (verify.at || []).filter((r) => r.ok === false);
+  const badNum = (verify.numbers || []).filter((x) => x.verified === false);
+  const badOwner = (verify.owners || []).filter((o) => o.verified === false);
+  const issues = badAt.length + badNum.length + badOwner.length;
+  if (!issues) {
+    return '<details class="fold"><summary>核验明细</summary>' +
+      '<div class="seg">时间戳、数字、负责人 —— 可核验项全部通过 ✅（归纳类内容无法逐字核验，仍需你判断）</div></details>';
+  }
+  const lines = [];
+  if (badAt.length) lines.push('时间戳对不上：' + badAt.map((r) => (r.field || '') + ' ' + (r.at || '—')).join('、'));
+  if (badNum.length) lines.push('数字在原文找不到：' + badNum.map((x) => x.value).join('、'));
+  if (badOwner.length) lines.push('负责人原文未提及：' + badOwner.map((o) => o.owner).join('、'));
+  return '<details class="fold"><summary>核验明细（' + issues + ' 处请你核对）</summary>' +
+    lines.map((l) => '<div class="warnline">⚠️ ' + esc(l) + '</div>').join('') + '</details>';
+}
+
+// 转写原文：让用户能自己核对「纪要忠不忠实、纠错有没有误伤」
+function renderTranscript(rec, seekable) {
+  const tr = rec.transcript;
+  if (!tr || !(tr.segments || []).length) return '';
+  const rows = tr.segments.map((s) => {
+    const fixed = s.raw && s.raw !== s.text;
+    return '<div class="seg">' + atHtml(fmtMmSs(s.start), seekable) +
+      '<span>' + esc(s.text || '') + '</span>' +
+      (fixed ? '<span class="fix">' + esc(s.raw) + '</span>' : '') + '</div>';
+  }).join('');
+  return '<details class="fold"><summary>查看转写原文（' + tr.segments.length + ' 段' +
+    (rec.correctionChanged ? '，已纠错 ' + rec.correctionChanged + ' 处' : '') + '）</summary>' +
+    '<p class="verify" style="margin:0 0 8px">划线处是纠错前的原话；有音频时点时间戳可跳转试听。</p>' +
+    rows + '</details>';
+}
+
+function renderBlock(key, n, seekable) {
   const items = n[key] || [];
   if (!items.length) return '';
 
   if (key === 'keyPoints') {
     return '<ul class="note">' + items.map((p) =>
       '<li><strong>' + esc(p.topic || '') + '</strong>' + (p.topic ? '：' : '') + esc(p.detail || '') +
-      '<span class="at">' + esc(p.at || '') + '</span></li>').join('') + '</ul>';
+      atHtml(p.at, seekable) + '</li>').join('') + '</ul>';
   }
   if (key === 'numbers') {
     return '<table class="nums"><thead><tr><th>数值</th><th>含义</th><th>位置</th></tr></thead><tbody>' +
       items.map((x) => '<tr><td>' + esc(x.value || '') + '</td><td>' + esc(x.meaning || '') +
-        '</td><td class="at">' + esc(x.at || '') + '</td></tr>').join('') + '</tbody></table>';
+        '</td><td>' + atHtml(x.at, seekable) + '</td></tr>').join('') + '</tbody></table>';
   }
   if (key === 'todos') {
-    return '<ul class="note todo">' + items.map((t) => {
+    return '<ul class="note todo">' + items.map((t, i) => {
       const tags = [];
       if (t.owner) tags.push('负责人：' + esc(t.owner));
       if (t.due) tags.push('期限：' + esc(t.due));
-      return '<li><span class="tick"></span>' + esc(t.what || '') +
+      return '<li class="todo"><span class="tick" data-tick="' + i + '"></span>' +
+        '<span class="what">' + esc(t.what || '') + '</span>' +
         (tags.length ? '<span class="tag">' + tags.join(' · ') + '</span>' : '') +
-        '<span class="at">' + esc(t.at || '') + '</span></li>';
+        atHtml(t.at, seekable) + '</li>';
     }).join('') + '</ul>';
   }
   return '<ul class="note">' + items.map((it) =>
-    '<li>' + esc(it.what != null ? it.what : (it.detail || '')) + '<span class="at">' + esc(it.at || '') + '</span></li>').join('') + '</ul>';
+    '<li>' + esc(it.what != null ? it.what : (it.detail || '')) + atHtml(it.at, seekable) + '</li>').join('') + '</ul>';
+}
+
+// ===== 详情页交互：点时间戳跳转 / 待办勾选 =====
+// 勾选状态只存浏览器本地 —— 这是"我自己的完成进度"，不是会议事实，不该回写服务端
+function todoKey(h) { return 'vv:todo:' + h; }
+function loadTodos(h) {
+  try { return JSON.parse(localStorage.getItem(todoKey(h)) || '[]'); } catch { return []; }
+}
+function saveTodos(h, arr) {
+  try { localStorage.setItem(todoKey(h), JSON.stringify(arr)); } catch { /* 隐私模式等，忽略 */ }
+}
+
+function bindDetail(hash) {
+  const box = $('dNote');
+
+  // ① 点时间戳 → 跳到音频对应位置播放
+  box.querySelectorAll('button.at[data-seek]').forEach((el) => {
+    el.onclick = () => {
+      const player = $('player');
+      if (!player || !player.getAttribute('src')) return;
+      try { player.currentTime = Number(el.dataset.seek) || 0; } catch { /* 元数据未就绪，忽略 */ }
+      player.play().catch(() => { /* 被浏览器拦自动播放：用户手动点播放即可 */ });
+      box.querySelectorAll('button.at.play').forEach((x) => x.classList.remove('play'));
+      el.classList.add('play');
+    };
+  });
+
+  // ② 待办勾选
+  const done = loadTodos(hash);
+  box.querySelectorAll('[data-tick]').forEach((el) => {
+    const i = Number(el.dataset.tick);
+    const li = el.closest('li');
+    if (done.includes(i)) { el.classList.add('on'); li.classList.add('done'); }
+    el.onclick = () => {
+      let arr = loadTodos(hash);
+      arr = arr.includes(i) ? arr.filter((x) => x !== i) : arr.concat(i);
+      saveTodos(hash, arr);
+      const on = arr.includes(i);
+      el.classList.toggle('on', on);
+      li.classList.toggle('done', on);
+    };
+  });
 }
 
 // ===== 详情页按钮 =====

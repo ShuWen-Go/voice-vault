@@ -55,6 +55,16 @@ const mimeTypes = {
   '.svg': 'image/svg+xml',
   '.png': 'image/png',
   '.ico': 'image/x-icon',
+  // 音频类型：<audio> 回放要用 —— 给成 octet-stream 浏览器就播不了
+  '.m4a': 'audio/mp4',
+  '.mp4': 'video/mp4',
+  '.webm': 'audio/webm',
+  '.ogg': 'audio/ogg',
+  '.opus': 'audio/ogg',
+  '.mp3': 'audio/mpeg',
+  '.wav': 'audio/wav',
+  '.aac': 'audio/aac',
+  '.flac': 'audio/flac',
 };
 
 function getMime(filePath) {
@@ -70,6 +80,15 @@ function sendJson(req, res, statusCode, body) {
   console.log(`${req.method} ${req.url} ${statusCode}`);
 }
 
+// 「拒绝继续收」类响应（413）专用：显式 Connection: close。
+// 为什么不能用 req.destroy() 了事：连接一断，413 就发不出去，用户只会看到"网络错误"，
+// 根本不知道是文件太大。先回响应、再让客户端按 close 语义收尾，才看得见原因。
+function sendJsonClose(req, res, statusCode, body) {
+  res.writeHead(statusCode, { 'Content-Type': 'application/json; charset=utf-8', Connection: 'close' });
+  res.end(JSON.stringify(body));
+  console.log(`${req.method} ${req.url} ${statusCode}`);
+}
+
 // 统一的文本/二进制响应 + 一行访问日志
 function sendRaw(req, res, statusCode, contentType, body) {
   res.writeHead(statusCode, { 'Content-Type': contentType });
@@ -77,38 +96,62 @@ function sendRaw(req, res, statusCode, contentType, body) {
   console.log(`${req.method} ${req.url} ${statusCode}`);
 }
 
+// JSON 请求体上限：这些接口只收 hash / quality 这种小字段，1MB 富余得很
+const MAX_JSON_BYTES = 1 * 1024 * 1024;
+
 // 读请求体为 Buffer（⚠️ 音频是二进制，转成 utf8 字符串就毁了）
 function readBodyBuffer(req) {
   return new Promise((resolve, reject) => {
     const chunks = [];
     let size = 0;
+    let stopped = false;
     req.on('data', (chunk) => {
+      if (stopped) return;
       size += chunk.length;
       if (size > MAX_UPLOAD_BYTES) {
-        reject(new Error(`文件超过 ${MAX_UPLOAD_BYTES / 1024 / 1024}MB 上限`));
-        req.destroy();
+        // ⚠️ 这里绝不能 req.destroy()：连接一断，调用方的 413 就发不出去，
+        // 用户只会看到"网络错误"，反而不知道是文件太大。
+        // 所以只停止接收 + 抛错，由调用方「先回响应，再把连接断掉」。
+        stopped = true;
+        req.pause();
+        const err = new Error(`文件超过 ${MAX_UPLOAD_BYTES / 1024 / 1024}MB 上限`);
+        err.code = 'TOO_LARGE';
+        reject(err);
         return;
       }
       chunks.push(chunk);
     });
-    req.on('end', () => resolve(Buffer.concat(chunks)));
-    req.on('error', reject);
+    req.on('end', () => { if (!stopped) resolve(Buffer.concat(chunks)); });
+    req.on('error', (err) => { if (!stopped) reject(err); });
   });
 }
 
-// 读 JSON 请求体
+// 读 JSON 请求体（同样加体积上限：不设限的话，一个超大 body 就能把内存吃光）
 function readJson(req) {
   return new Promise((resolve, reject) => {
     const chunks = [];
-    req.on('data', (c) => chunks.push(c));
+    let size = 0;
+    let stopped = false;
+    req.on('data', (c) => {
+      if (stopped) return;
+      size += c.length;
+      if (size > MAX_JSON_BYTES) {
+        stopped = true;
+        req.pause();
+        reject(new Error('请求体过大'));
+        return;
+      }
+      chunks.push(c);
+    });
     req.on('end', () => {
+      if (stopped) return;
       try {
         resolve(JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}'));
       } catch (err) {
         reject(err);
       }
     });
-    req.on('error', reject);
+    req.on('error', (err) => { if (!stopped) reject(err); });
   });
 }
 
@@ -152,6 +195,21 @@ function loadIndex() {
   } catch {
     return { items: [] };
   }
+}
+
+// 清单更新串行化：读→改→写本身不是原子的。
+// 两个上传并发完成时，各自读到旧清单、各自写回 ⇒ 后写的把前一条覆盖掉（条目丢失）。
+// 所有写入都排进同一个 Promise 链，保证一次只有一个在改。
+let indexWriteChain = Promise.resolve();
+function updateIndex(mutator) {
+  const next = indexWriteChain.then(async () => {
+    const index = loadIndex();
+    mutator(index);
+    await writeFile(INDEX_PATH, JSON.stringify(index, null, 2), 'utf8');
+  });
+  // 某次失败不能把后面的写入卡死；错误交给调用方 await 那一次处理
+  indexWriteChain = next.catch(() => {});
+  return next;
 }
 
 // hash → 音频绝对路径（后缀优先从清单查，清单没有就按白名单逐个试探）
@@ -201,11 +259,21 @@ async function handleUpload(req, res) {
     }
   }
 
+  // 先看 Content-Length 提前拦：省得把 300MB 全收进内存才回头报错
+  const declared = Number(req.headers['content-length'] || 0);
+  if (declared > MAX_UPLOAD_BYTES) {
+    sendJsonClose(req, res, 413, {
+      error: `文件约 ${(declared / 1024 / 1024).toFixed(1)}MB，超过 ${MAX_UPLOAD_BYTES / 1024 / 1024}MB 上限`,
+    });
+    return;
+  }
+
   let buf;
   try {
     buf = await readBodyBuffer(req);
   } catch (err) {
-    sendJson(req, res, 413, { error: err.message });
+    // 兜底分支（客户端没报 Content-Length 或报得不实）：同样要让原因送得出去
+    sendJsonClose(req, res, 413, { error: err.message });
     return;
   }
   if (!buf || buf.length === 0) {
@@ -224,10 +292,11 @@ async function handleUpload(req, res) {
     if (!existed) await writeFile(target, buf);
 
     // 清单里按 hash 去重更新（重复上传只刷时间，不新增条目）
-    const index = loadIndex();
-    const item = { hash, ext, filename, bytes: buf.length, uploadedAt: new Date().toISOString() };
-    index.items = [item, ...index.items.filter((it) => it.hash !== hash)];
-    await writeFile(INDEX_PATH, JSON.stringify(index, null, 2), 'utf8');
+    // ⚠️ 必须走串行队列：并发上传下，读→改→写会互相覆盖、丢条目
+    await updateIndex((index) => {
+      const item = { hash, ext, filename, bytes: buf.length, uploadedAt: new Date().toISOString() };
+      index.items = [item, ...index.items.filter((it) => it.hash !== hash)];
+    });
 
     sendJson(req, res, 200, {
       ok: true,
@@ -255,6 +324,59 @@ function handleList(req, res) {
     transcribed: fs.existsSync(path.join(TRANSCRIPT_DIR, it.hash + '.json')),
   }));
   sendJson(req, res, 200, { count: items.length, items });
+}
+
+// ========== D6 后补 · GET /api/audio/:hash：把音频流回去（供 <audio> 回放）==========
+// 有了这一条，纪要里的 [00:34] 才不是摆设 —— 点一下能跳回去听。
+// 必须支持 Range：否则浏览器只能整段下载完才能播，进度条拖不动。
+function handleAudioStream(req, res, hash) {
+  const file = findAudioByHash(hash);
+  let stat = null;
+  if (file) {
+    try { stat = fs.statSync(file); } catch { stat = null; }
+  }
+  if (!stat || !stat.isFile()) {
+    sendJson(req, res, 404, { error: '音频不存在（可能只保留了转写与纪要）' });
+    return;
+  }
+
+  const type = getMime(file);
+  const range = req.headers.range;
+
+  if (range) {
+    const m = /^bytes=(\d*)-(\d*)$/.exec(String(range).trim());
+    if (m && (m[1] || m[2])) {
+      let start, end;
+      if (m[1]) {
+        start = parseInt(m[1], 10);
+        end = m[2] ? Math.min(parseInt(m[2], 10), stat.size - 1) : stat.size - 1;
+      } else {
+        start = Math.max(0, stat.size - parseInt(m[2], 10)); // bytes=-N ⇒ 最后 N 字节
+        end = stat.size - 1;
+      }
+      if (!Number.isFinite(start) || !Number.isFinite(end) || start >= stat.size || end < start) {
+        res.writeHead(416, { 'Content-Range': `bytes */${stat.size}` });
+        res.end();
+        return;
+      }
+      res.writeHead(206, {
+        'Content-Type': type,
+        'Content-Length': end - start + 1,
+        'Content-Range': `bytes ${start}-${end}/${stat.size}`,
+        'Accept-Ranges': 'bytes',
+      });
+      fs.createReadStream(file, { start, end }).pipe(res);
+      return;
+    }
+  }
+
+  res.writeHead(200, {
+    'Content-Type': type,
+    'Content-Length': stat.size,
+    'Accept-Ranges': 'bytes',
+  });
+  fs.createReadStream(file).pipe(res);
+  console.log(`${req.method} ${req.url} 200（音频 ${(stat.size / 1024 / 1024).toFixed(1)}MB）`);
 }
 
 // ========== D3 · 转写任务 ==========
@@ -337,6 +459,17 @@ const server = http.createServer((req, res) => {
       return;
     }
     handleUpload(req, res);
+    return;
+  }
+
+  // 音频回放（D6 后补）：GET /api/audio/:hash —— 供详情页 <audio> 播放与拖进度
+  const audioMatch = pathname.match(/^\/api\/audio\/([0-9a-f]{12})$/);
+  if (audioMatch) {
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      sendJson(req, res, 400, { error: '请使用 GET 获取音频' });
+      return;
+    }
+    handleAudioStream(req, res, audioMatch[1]);
     return;
   }
 

@@ -113,11 +113,16 @@ export function checkNote(note) {
 const CN_DIGIT = { 零: 0, 〇: 0, 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 };
 const CN_UNIT = { 十: 10, 百: 100, 千: 1000, 万: 10000 };
 
-// 汉字数字 → 阿拉伯（覆盖 十五 / 七十五 / 五百 / 两千 / 一万 这类常见写法）
+// 数字（汉字或阿拉伯）→ 数值
+// 覆盖：十五 / 七十五 / 五百 / 两千 / 一万，以及 **3千 / 8万 / 3.5万 这类混写**
+// ⚠️ 混写必须支持：语音转写里"3千""8万"极常见。若只认汉字，
+//    "3千"会被拆成 3 与 千(1000)，归一化成 "31000" —— 于是"3000"在原文里找不到，
+//    核验器会把**正确**的输出判成可疑（误报）。实测踩到过。
 function cn2num(str) {
   let result = 0, section = 0, number = 0, seen = false;
   for (const ch of str) {
-    if (CN_DIGIT[ch] !== undefined) { number = CN_DIGIT[ch]; seen = true; }
+    if (ch >= '0' && ch <= '9') { number = number * 10 + Number(ch); seen = true; }
+    else if (CN_DIGIT[ch] !== undefined) { number = number * 10 + CN_DIGIT[ch]; seen = true; }
     else if (CN_UNIT[ch] !== undefined) {
       seen = true;
       const unit = CN_UNIT[ch];
@@ -134,11 +139,12 @@ function normBasic(s) {
   let t = String(s ?? '');
   t = t.replace(/[０-９Ａ-Ｚａ-ｚ％（）]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xfee0));
   t = t.replace(/％/g, '%');
-  t = t.replace(/百分之([零〇一二两三四五六七八九十百千万]+)/g, (m, g) => {
+  t = t.replace(/百分之([0-9零〇一二两三四五六七八九十百千万]+)/g, (m, g) => {
     const n = cn2num(g);
     return n === null ? m : n + '%';
   });
-  t = t.replace(/[零〇一二两三四五六七八九十百千万]+/g, (m) => {
+  // 阿拉伯数字也要纳入匹配：否则「3千」只会匹配到「千」，被归一化成 31000（见 cn2num 的说明）
+  t = t.replace(/[0-9零〇一二两三四五六七八九十百千万]+/g, (m) => {
     const n = cn2num(m);
     return n === null ? m : String(n);
   });
@@ -149,6 +155,11 @@ function normBasic(s) {
 function numberTokens(s) {
   return [...normBasic(s).matchAll(/\d+(?:\.\d+)?/g)].map((m) => m[0]);
 }
+
+// 关于「要不要给数字核验加数字边界」（如 (?<!\d)3(?!\d)）—— 实测结论：**不加**。
+// 边界会把**正确**的判成可疑：原文「3千」归一化后是 3000，带边界的 3 匹配不上 3000 ⇒ 误报。
+// 按"宁可漏检，不可误报"：3 命中 "13" 只是漏检（少抓一次编造）；
+// 若改成边界，会把正确结果标红，用户会以为系统在骗他 —— 那更糟。
 
 // 内容层判据（本项目的版本）：核验「实体」而不是「金句」
 // 能核的：时间戳是否真在输入里 / owner 与 numbers 是否在原文出现
