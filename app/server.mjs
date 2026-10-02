@@ -485,6 +485,87 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // ========== D5 存档与历史 ==========
+  // 列表：所有处理过的会议（含状态三态与统计）
+  if (pathname === '/api/records') {
+    (async () => {
+      const { createStore } = await import('./store.mjs');
+      sendJson(req, res, 200, createStore().listRecords());
+    })();
+    return;
+  }
+
+  // 单条记录：
+  //   GET    /api/record/:hash            → 摘要
+  //   GET    /api/record/:hash?full=1     → 全量（含转写全文与纪要核验）
+  //   GET    /api/record/:hash/export     → Markdown（?download=1 触发下载）
+  //   DELETE /api/record/:hash            → 删除这条记录的全部产物
+  const recMatch = pathname.match(/^\/api\/record\/([0-9a-f]{12})(\/export)?$/);
+  if (recMatch) {
+    const hash = recMatch[1];
+    const isExport = !!recMatch[2];
+    (async () => {
+      const { createStore } = await import('./store.mjs');
+      const store = createStore();
+
+      // 删除：不可逆操作 —— 把删掉了哪些文件一并返回，让调用方看得见
+      if (req.method === 'DELETE') {
+        if (isExport) {
+          sendJson(req, res, 400, { error: '导出地址不支持删除' });
+          return;
+        }
+        const r = store.deleteRecord(hash);
+        if (!r) {
+          sendJson(req, res, 400, { error: 'hash 不合法' });
+          return;
+        }
+        console.log(`删除记录 ${hash}：${r.count} 个文件`, r.removed);
+        sendJson(req, res, 200, { ok: true, ...r });
+        return;
+      }
+
+      if (req.method !== 'GET') {
+        sendJson(req, res, 400, { error: '不支持的请求方法' });
+        return;
+      }
+
+      const url = new URL(req.url, 'http://localhost');
+
+      // 导出 Markdown
+      if (isExport) {
+        const rec = store.readRecord(hash, { full: true });
+        if (!rec) {
+          sendJson(req, res, 404, { error: '这条记录不存在' });
+          return;
+        }
+        const { toMarkdown } = await import('./export.mjs');
+        const md = toMarkdown(rec);
+        if (url.searchParams.get('download') === '1') {
+          // 中文文件名要走 RFC 5987 编码，否则浏览器会存成乱码
+          const name = String(rec.title || rec.filename || hash).replace(/[\\/:*?"<>|]/g, '_').slice(0, 40);
+          res.writeHead(200, {
+            'Content-Type': 'text/markdown; charset=utf-8',
+            'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(name + '.md')}`,
+          });
+          res.end(md);
+          console.log(`${req.method} ${req.url} 200（Markdown ${md.length} 字，触发下载）`);
+        } else {
+          sendRaw(req, res, 200, 'text/markdown; charset=utf-8', md);
+        }
+        return;
+      }
+
+      const full = url.searchParams.get('full') === '1';
+      const rec = store.readRecord(hash, { full });
+      if (!rec) {
+        sendJson(req, res, 404, { error: '这条记录不存在' });
+        return;
+      }
+      sendJson(req, res, 200, rec);
+    })();
+    return;
+  }
+
   // D3-b 重跑纠错：改完词表不用重新转写（转写是最贵的一步，纠错是免费的）
   if (pathname === '/api/correct') {
     if (req.method !== 'POST') {
