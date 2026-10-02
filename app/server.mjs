@@ -379,6 +379,112 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // ========== D4 生成结构化纪要 ==========
+  if (pathname === '/api/structure') {
+    if (req.method !== 'POST') {
+      sendJson(req, res, 400, { error: '请使用 POST 调用 /api/structure' });
+      return;
+    }
+    (async () => {
+      let payload;
+      try {
+        payload = await readJson(req);
+      } catch {
+        sendJson(req, res, 400, { error: '请求体不是合法 JSON' });
+        return;
+      }
+      const hash = typeof payload.hash === 'string' ? payload.hash : '';
+      if (!/^[0-9a-f]{12}$/.test(hash)) {
+        sendJson(req, res, 400, { error: 'hash 不合法' });
+        return;
+      }
+
+      // 前置：必须有转写产物（而且要用「纠错后」的文本 —— 错误词会被模型当成真词理解）
+      let tr;
+      try {
+        tr = JSON.parse(fs.readFileSync(path.join(TRANSCRIPT_DIR, hash + '.json'), 'utf8'));
+      } catch {
+        sendJson(req, res, 404, { error: '还没有这份转写，请先转写' });
+        return;
+      }
+
+      const NOTE_DIR = path.join(config.dataDir, 'notes');
+      const notePath = path.join(NOTE_DIR, hash + '.json');
+
+      // 幂等：已有纪要直接读档（LLM 要花钱、还可能不稳定，能读档就不重算）
+      if (!payload.force && fs.existsSync(notePath)) {
+        try {
+          const cached = JSON.parse(fs.readFileSync(notePath, 'utf8'));
+          console.log(`纪要缓存命中：${hash}`);
+          sendJson(req, res, 200, { ...cached, fromCache: true });
+          return;
+        } catch { /* 档案坏了 → 重新生成 */ }
+      }
+
+      if (!config.deepseekKey) {
+        sendJson(req, res, 500, { error: '未配置 DEEPSEEK_API_KEY（见 .env）' });
+        return;
+      }
+
+      const segments = (tr.segments ?? []).map((s) => ({ start: s.start, text: s.text }));
+      const startedAt = Date.now();
+      try {
+        const { structureMeeting } = await import('./structure.mjs');
+        const r = await structureMeeting(
+          {
+            hash,
+            segments,
+            text: tr.corrected || segments.map((s) => s.text).join(''),
+            duration: tr.durationSeconds,
+            quality: tr.quality,
+          },
+          { apiKey: config.deepseekKey },
+        );
+
+        const record = {
+          hash,
+          note: r.note,
+          verify: r.verify,
+          meta: {
+            quality: tr.quality,
+            durationSeconds: tr.durationSeconds,
+            segmentCount: segments.length,
+            finishReason: r.finishReason,
+            jsonFenced: r.jsonFenced,
+            usage: r.usage,
+            elapsedMs: Date.now() - startedAt,
+          },
+          createdAt: new Date().toISOString(),
+        };
+        fs.mkdirSync(NOTE_DIR, { recursive: true });
+        fs.writeFileSync(notePath, JSON.stringify(record, null, 1), 'utf8');
+
+        console.log(
+          `纪要生成 ${hash}：${r.note.title}｜类型=${r.note.meetingType}｜` +
+          `要点${r.note.keyPoints.length}/数字${r.note.numbers.length}/待办${r.note.todos.length}｜` +
+          `时间戳可疑${r.verify.summary.badAt}｜耗时${record.meta.elapsedMs}ms`,
+        );
+        sendJson(req, res, 200, { ...record, fromCache: false });
+      } catch (err) {
+        console.error('结构化失败：', err.message);
+        sendJson(req, res, 502, { error: '结构化失败：' + err.message });
+      }
+    })();
+    return;
+  }
+
+  // D4 读取某份纪要
+  const noteMatch = pathname.match(/^\/api\/note\/([0-9a-f]{12})$/);
+  if (noteMatch) {
+    try {
+      const rec = JSON.parse(fs.readFileSync(path.join(config.dataDir, 'notes', noteMatch[1] + '.json'), 'utf8'));
+      sendJson(req, res, 200, rec);
+    } catch {
+      sendJson(req, res, 404, { error: '这份纪要不存在' });
+    }
+    return;
+  }
+
   // D3-b 重跑纠错：改完词表不用重新转写（转写是最贵的一步，纠错是免费的）
   if (pathname === '/api/correct') {
     if (req.method !== 'POST') {

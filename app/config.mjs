@@ -53,6 +53,8 @@ export const config = {
   port: Number(pick('PORT', '3000')) || 3000,
   // 数据目录
   dataDir: path.join(repoRoot, 'data'),
+  // DeepSeek 密钥 —— 只活在服务端；前端永远拿不到（W2 结论：Key 只在服务端）
+  deepseekKey: pick('DEEPSEEK_API_KEY', ''),
 };
 
 // 启动时把关键配置打出来 —— 路径配错时，看启动日志比看报错快
