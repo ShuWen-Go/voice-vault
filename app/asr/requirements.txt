@@ -1,0 +1,13 @@
+# 听藏 · ASR 依赖锁（版本是实测踩坑换来的，别随手升级）
+#
+# ⚠️ av 必须锁 18.x：
+#    av 19.0.0 改了 API，faster-whisper 1.2.1 调用 av.open(metadata_errors=...)
+#    会直接报 TypeError: open() got an unexpected keyword argument 'metadata_errors'
+#    —— 2026-10-01 实测，装最新版反而不兼容。
+#
+# 安装（Windows 用国内源，实测阿里云/清华极慢，腾讯云快 30 倍）：
+#   pip install -r requirements.txt -i https://mirrors.cloud.tencent.com/pypi/simple/
+
+faster-whisper==1.2.1
+ctranslate2==4.8.1
+av==18.0.0
