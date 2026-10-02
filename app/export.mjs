@@ -28,6 +28,14 @@ const BLOCK_ORDER = {
 };
 const DEFAULT_ORDER = ['keyPoints', 'todos', 'decisions', 'numbers', 'openQuestions', 'risks'];
 
+// 供**前端**复用：区块渲染顺序。
+// 为什么必须导出：如果前端自己也写一份排序表，就变成两份规则 ——
+// 迟早出现「页面上看到的顺序 ≠ 导出的顺序」。规则只能有一处（链藏的同一条教训）。
+export function getBlockOrder(meetingType) {
+  return BLOCK_ORDER[meetingType] ?? DEFAULT_ORDER;
+}
+export { BLOCK_TITLE };
+
 const ts = (at) => (at ? `[${at}]` : '');
 
 function fmtTime(iso) {

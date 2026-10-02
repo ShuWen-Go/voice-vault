@@ -561,6 +561,11 @@ const server = http.createServer((req, res) => {
         sendJson(req, res, 404, { error: '这条记录不存在' });
         return;
       }
+      // 渲染顺序与区块标题只定义在 export.mjs 一处，这里算好给前端 ——
+      // 避免前端再实现一遍，最后「页面顺序 ≠ 导出顺序」
+      const { getBlockOrder, BLOCK_TITLE } = await import('./export.mjs');
+      rec.blockOrder = getBlockOrder(rec.meetingType);
+      rec.blockTitles = BLOCK_TITLE;
       sendJson(req, res, 200, rec);
     })();
     return;
