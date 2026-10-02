@@ -13,6 +13,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { config } from './config.mjs';
+// D3-b：转写一结束就自动跑一遍确定性纠错（"计效→绩效"这类系统性错字）
+import { correctTranscriptFile } from './correct.mjs';
 
 const SCRIPT_PATH = fileURLToPath(new URL('./asr/transcribe.py', import.meta.url));
 const TRANSCRIPT_DIR = path.join(config.dataDir, 'transcripts');
@@ -74,6 +76,18 @@ export function createTranscriber() {
       t.elapsedSeconds = ev.elapsedSeconds;
       t.rtf = ev.rtf;
       t.language = ev.language;
+      // D3-b：转写完成后立刻做确定性纠错。
+      // 为什么搭在这里而不是独立一步：纠错是纯字符串处理（毫秒级），转写是最贵的一步（分钟级）——
+      // 让纠错搭转写的顺风车，用户不用多等一次。词表改了可以用 POST /api/correct 单独重跑。
+      // 纠错失败只记日志，绝不推翻「转写已成功」这个事实。
+      try {
+        const c = correctTranscriptFile(t.hash, { transcriptDir: TRANSCRIPT_DIR });
+        t.correction = { changed: c.changed, summary: c.summary };
+        console.log(`纠错 ${t.hash}：修了 ${c.changed} 处`, c.summary);
+      } catch (err) {
+        console.error('[correct] 纠错失败（转写结果本身仍然有效）：', err.message);
+        t.correction = { error: err.message };
+      }
       t.result = readCached(t.hash); // 产物已落盘，直接读回来（只有一份真源）
     } else if (ev.type === 'error') {
       t.status = 'failed';

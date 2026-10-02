@@ -379,6 +379,38 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // D3-b 重跑纠错：改完词表不用重新转写（转写是最贵的一步，纠错是免费的）
+  if (pathname === '/api/correct') {
+    if (req.method !== 'POST') {
+      sendJson(req, res, 400, { error: '请使用 POST 调用 /api/correct' });
+      return;
+    }
+    (async () => {
+      let payload;
+      try {
+        payload = await readJson(req);
+      } catch {
+        sendJson(req, res, 400, { error: '请求体不是合法 JSON' });
+        return;
+      }
+      const hash = typeof payload.hash === 'string' ? payload.hash : '';
+      if (!/^[0-9a-f]{12}$/.test(hash)) {
+        sendJson(req, res, 400, { error: 'hash 不合法' });
+        return;
+      }
+      try {
+        const { correctTranscriptFile } = await import('./correct.mjs');
+        const r = correctTranscriptFile(hash, { transcriptDir: TRANSCRIPT_DIR });
+        console.log(`纠错 ${hash}：修了 ${r.changed} 处`, r.summary);
+        sendJson(req, res, 200, r);
+      } catch (err) {
+        console.error('纠错失败：', err.message);
+        sendJson(req, res, 500, { error: '纠错失败：' + err.message });
+      }
+    })();
+    return;
+  }
+
   // D3 最近任务（内存态：服务重启即空 —— 有意设计，产物才是持久的）
   if (pathname === '/api/tasks') {
     sendJson(req, res, 200, { items: transcriber.list() });
