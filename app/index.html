@@ -229,7 +229,7 @@ function showView(name) {
 function uploadBlob(blob, filename, onProgress) {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
-    xhr.open('POST', '/api/audio');
+    xhr.open('POST', 'api/audio');
     xhr.setRequestHeader('Content-Type', blob.type || 'application/octet-stream');
     xhr.setRequestHeader('X-Filename', encodeURIComponent(filename));
     xhr.upload.onprogress = (e) => { if (e.lengthComputable) onProgress(e.loaded / e.total); };
@@ -255,7 +255,7 @@ const onUp = (p) => { $('upBarIn').style.width = (p * 100).toFixed(1) + '%'; };
 // ===== 列表 =====
 async function loadList() {
   try {
-    const d = await get('/api/records');
+    const d = await get('api/records');
     $('stats').textContent = '共 ' + d.count + ' 场 ｜ 总时长 ' + fmtDur(d.stats.totalDurationSeconds) +
       ' ｜ 已有纪要 ' + d.stats.structured;
     const box = $('records');
@@ -285,7 +285,7 @@ function cardHtml(it) {
       '<span class="muted">' + (it.meetingType ? esc(it.meetingType) + ' · ' : '') + fmtTime(it.updatedAt) + '</span>' +
       '<span class="spacer"></span>' +
       '<button class="ghost sm" data-open="' + it.hash + '">查看</button>' +
-      '<a class="btn ghost sm" href="/api/record/' + it.hash + '/export?download=1">导出</a>' +
+      '<a class="btn ghost sm" href="api/record/' + it.hash + '/export?download=1">导出</a>' +
     '</div>' +
   '</div>';
 }
@@ -305,7 +305,7 @@ function failProc(msgText) {
 
 async function pollTask(id, onTick) {
   for (let i = 0; i < 3000; i++) {
-    const t = await get('/api/transcribe/' + id);
+    const t = await get('api/transcribe/' + id);
     onTick(t);
     if (t.status === 'done') return t;
     if (t.status === 'failed') throw new Error(t.error || '转写失败');
@@ -324,7 +324,7 @@ async function runPipeline(hash, quality) {
   setProc('正在准备…', 0, '');
 
   try {
-    const task = await post('/api/transcribe', { hash, quality });
+    const task = await post('api/transcribe', { hash, quality });
     currentTaskId = task.id;
 
     await pollTask(task.id, (t) => {
@@ -336,7 +336,7 @@ async function runPipeline(hash, quality) {
 
     currentTaskId = null;
     setProc('正在生成纪要…', 100, '模型按字段归纳，约 15 秒');
-    await post('/api/structure', { hash });
+    await post('api/structure', { hash });
     await openDetail(hash);
   } catch (err) {
     currentTaskId = null;
@@ -346,7 +346,7 @@ async function runPipeline(hash, quality) {
 
 async function cancelCurrent() {
   if (!currentTaskId) { showView('list'); loadList(); return; }
-  try { await api('/api/transcribe/' + currentTaskId, { method: 'DELETE' }); } catch { /* 忽略 */ }
+  try { await api('api/transcribe/' + currentTaskId, { method: 'DELETE' }); } catch { /* 忽略 */ }
   currentTaskId = null;
   failProc('任务已取消');
 }
@@ -425,7 +425,7 @@ async function openDetail(hash) {
   currentHash = hash;
   $('dNote').innerHTML = '<div class="card empty">加载中…</div>';
   try {
-    const rec = await get('/api/record/' + hash + '?full=1');
+    const rec = await get('api/record/' + hash + '?full=1');
     $('dTitle').textContent = rec.title || rec.filename || hash;
     const bits = [
       rec.meetingType ? '类型 ' + rec.meetingType : null,
@@ -446,7 +446,7 @@ async function openDetail(hash) {
     const player = $('player');
     if (rec.audioOnDisk) {
       $('playerCard').hidden = false;
-      player.src = '/api/audio/' + hash;
+      player.src = 'api/audio/' + hash;
     } else {
       $('playerCard').hidden = true;
       player.removeAttribute('src');
@@ -614,7 +614,7 @@ function bindDetail(hash) {
 
 // ===== 详情页按钮 =====
 $('backBtn').onclick = () => { showView('list'); loadList(); };
-$('exportBtn').onclick = () => { if (currentHash) window.location.href = '/api/record/' + currentHash + '/export?download=1'; };
+$('exportBtn').onclick = () => { if (currentHash) window.location.href = 'api/record/' + currentHash + '/export?download=1'; };
 $('regenBtn').onclick = async () => {
   if (!currentHash) return;
   if (!confirm('重新生成会再调用一次模型（约 15 秒，费用极小）。继续？')) return;
@@ -624,7 +624,7 @@ $('regenBtn').onclick = async () => {
   $('cancelBtn').onclick = () => { showView('list'); loadList(); };
   setProc('正在重新生成纪要…', 100, '模型按字段归纳，约 15 秒');
   try {
-    await post('/api/structure', { hash: currentHash, force: true });
+    await post('api/structure', { hash: currentHash, force: true });
     await openDetail(currentHash);
   } catch (err) {
     failProc(err.message);
@@ -634,7 +634,7 @@ $('delBtn').onclick = async () => {
   if (!currentHash) return;
   if (!confirm('删除后这条记录的音频、转写、纪要都会被移除，且无法恢复。确定删除？')) return;
   try {
-    const r = await api('/api/record/' + currentHash, { method: 'DELETE' });
+    const r = await api('api/record/' + currentHash, { method: 'DELETE' });
     alert('已删除（' + r.count + ' 个文件）');
     currentHash = null;
     showView('list');

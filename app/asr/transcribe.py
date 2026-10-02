@@ -78,6 +78,9 @@ def main():
 
     emit({"type": "stage", "stage": "transcribing", "loadSeconds": load_s})
 
+    # 中文简繁不稳定：同一个模型、同样设了 language=zh，有的录音全出简体、有的全出繁体。
+    # Whisper 官方推荐用 initial_prompt 给一句「同语言的引导」来稳定输出风格 —— 实测有效。
+    hint = "以下是一段普通话会议录音的转写。" if args.language not in ("", "auto") else None
     try:
         t1 = time.time()
         seg_iter, info = model.transcribe(
@@ -85,6 +88,7 @@ def main():
             language=None if args.language in ("", "auto") else args.language,
             beam_size=5,
             vad_filter=True,
+            initial_prompt=hint,
         )
     except Exception as e:
         emit({"type": "error", "message": "解码失败（文件可能损坏或格式不支持）：" + str(e)})
