@@ -242,7 +242,24 @@ app/
   export.mjs          Markdown 导出（区块顺序随会议类型变）
   index.html          单页三视图（列表 / 处理中 / 详情）
   asr/
-    transcribe.py     Whisper 推理（stdout JSON 行协议 + 流式进度）
+    transcribe.py     Whisper 推理（stdout JSON 行协议 + 流式进度 + 判据落盘）
     requirements.txt  依赖锁（av==18.0.0 是实测踩坑换来的）
     fetch_model.py    模型下载（走 hf-mirror）
+tools/
+  pick_channel.py    多通道选择实验（用「覆盖率 + 模型置信度」双指标挑最优通道）
+  make_demo_audio.py 把公开语料的多通道录音压成单声道演示音频
+```
+
+### 复现演示音频
+
+```bash
+# 1) 取公开语料（AISHELL-4 测试集某一场，Apache-2.0）
+curl -L -o aishell4.flac \
+  "https://hf-mirror.com/datasets/AISHELL/AISHELL-4/resolve/main/test/wav/S_R004S04C01.flac"
+
+# 2) 多通道择优（3 个时间点 × 8 通道 + 混音，双指标）
+python tools/pick_channel.py aishell4.flac <模型目录> ./probe 60,900,1800 20
+
+# 3) 按选出的通道压成单声道 16k（38 分钟 → 约 13.5 MB）
+python tools/make_demo_audio.py aishell4.flac demo.m4a ch4
 ```
