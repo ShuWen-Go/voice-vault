@@ -94,6 +94,14 @@ export function correctTranscriptFile(hash, { transcriptDir, rules } = {}) {
   const useRules = rules ?? loadRules();
 
   const segments = (data.segments ?? []).map((s) => {
+    // 被静音闸门判定为幻觉的段：不纠错、也不进 corrected
+    // —— 纠错对"本来就编造出来的句子"没有意义
+    if (s?.gate?.drop) {
+      const out = { ...s };
+      delete out.raw;
+      delete out.corrections;
+      return out;
+    }
     // 幂等：若这段之前纠错过，从 raw（原始转写）重新来 ——
     // 否则重复纠错会把 raw 覆盖成「已纠错文本」，原文就再也找不回来了。
     // 「原文永不覆盖」是这一层的底线：纠错可以被推翻，转写事实不行。
@@ -121,10 +129,11 @@ export function correctTranscriptFile(hash, { transcriptDir, rules } = {}) {
   }
 
   data.segments = segments;
-  data.corrected = segments.map((s) => s.text).join('');
+  data.corrected = segments.filter((s) => !s?.gate?.drop).map((s) => s.text).join('');
   data.correctionSummary = summary;
   data.correctionChanged = changed;
-  data.correctedSegmentCount = segments.filter((s) => s.raw).length;
+  // 计数也只算"留下的"段 —— 否则统计口径和 corrected 正文对不上
+  data.correctedSegmentCount = segments.filter((s) => s.raw && !s?.gate?.drop).length;
   data.correctedAt = new Date().toISOString();
   data.rulesVersion = useRules.version;
 

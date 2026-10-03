@@ -780,6 +780,42 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // D3-c 重跑闸门：同样的理由 —— 转写是最贵的一步，闸门规则改了不该重转
+  // ⚠️ 注意顺序：闸门必须在纠错之前跑（闸门的「提示词回声」判据依赖模型原始吐字）
+  if (pathname === '/api/gate') {
+    if (req.method !== 'POST') {
+      sendJson(req, res, 400, { error: '请使用 POST 调用 /api/gate' });
+      return;
+    }
+    (async () => {
+      let payload;
+      try {
+        payload = await readJson(req);
+      } catch {
+        sendJson(req, res, 400, { error: '请求体不是合法 JSON' });
+        return;
+      }
+      const hash = typeof payload.hash === 'string' ? payload.hash : '';
+      if (!/^[0-9a-f]{12}$/.test(hash)) {
+        sendJson(req, res, 400, { error: 'hash 不合法' });
+        return;
+      }
+      try {
+        const { gateTranscriptFile } = await import('./gate.mjs');
+        const g = gateTranscriptFile(hash, { transcriptDir: TRANSCRIPT_DIR });
+        // 闸门换了判定 → 纠错产物（corrected）必须跟着重算，否则正文里还留着丢掉的段
+        const { correctTranscriptFile } = await import('./correct.mjs');
+        const c = correctTranscriptFile(hash, { transcriptDir: TRANSCRIPT_DIR });
+        console.log(`闸门重跑 ${hash}：丢弃 ${g.dropped}/${g.total} 段，纠错 ${c.changed} 处`);
+        sendJson(req, res, 200, { ...g, correction: { changed: c.changed, summary: c.summary } });
+      } catch (err) {
+        console.error('闸门重跑失败：', err.message);
+        sendJson(req, res, 500, { error: '闸门重跑失败：' + err.message });
+      }
+    })();
+    return;
+  }
+
   // D3-b 重跑纠错：改完词表不用重新转写（转写是最贵的一步，纠错是免费的）
   if (pathname === '/api/correct') {
     if (req.method !== 'POST') {

@@ -96,6 +96,9 @@
   .seg { font-size:13.5px; padding:4px 0; border-bottom:1px dashed #F0EEE7; }
   .seg:last-child { border-bottom:none; }
   .fix { font-size:12px; color:#A9A79F; text-decoration:line-through; margin-left:6px; }
+  .seg.dropped { opacity:.55; }
+  .seg.dropped > span:first-of-type { text-decoration:line-through; }
+  .drop { font-size:11.5px; color:#B08968; margin-left:6px; }
   .warnline { font-size:13px; color:#8A1F1F; padding:3px 0; }
   li.todo { cursor:default; }
   li.todo.done { color:#A9A79F; }
@@ -433,6 +436,7 @@ async function openDetail(hash) {
       rec.transcript && rec.transcript.quality ? '转写 ' + rec.transcript.quality + ' 档' : null,
       rec.transcript && rec.transcript.rtf ? 'RTF ' + rec.transcript.rtf : null,
       rec.correctionChanged ? '纠错 ' + rec.correctionChanged + ' 处' : null,
+      rec.gateDropped ? '静音闸门丢 ' + rec.gateDropped + ' 段' : null,
     ].filter(Boolean);
     $('dMeta').textContent = bits.join('  ｜  ');
 
@@ -529,15 +533,26 @@ function renderVerifyDetail(verify) {
 function renderTranscript(rec, seekable) {
   const tr = rec.transcript;
   if (!tr || !(tr.segments || []).length) return '';
+  const gated = (tr.segments || []).filter((s) => s.gate && s.gate.drop).length;
   const rows = tr.segments.map((s) => {
     const fixed = s.raw && s.raw !== s.text;
-    return '<div class="seg">' + atHtml(fmtMmSs(s.start), seekable) +
-      '<span>' + esc(s.text || '') + '</span>' +
-      (fixed ? '<span class="fix">' + esc(s.raw) + '</span>' : '') + '</div>';
+    // 被静音闸门判定为幻觉的段：划掉并标出理由 —— 不隐藏，
+    // 用户要能自己核对「系统到底丢了什么、凭什么丢」
+    const dropped = s.gate && s.gate.drop;
+    const cls = dropped ? 'seg dropped' : 'seg';
+    const mark = dropped
+      ? '<span class="drop">静音闸门已丢：' + esc(s.gate.label || s.gate.reason || '') +
+        (s.gate.detail ? '（' + esc(s.gate.detail) + '）' : '') + '</span>'
+      : (fixed ? '<span class="fix">' + esc(s.raw) + '</span>' : '');
+    return '<div class="' + cls + '">' + atHtml(fmtMmSs(s.start), seekable) +
+      '<span>' + esc(s.text || '') + '</span>' + mark + '</div>';
   }).join('');
   return '<details class="fold"><summary>查看转写原文（' + tr.segments.length + ' 段' +
-    (rec.correctionChanged ? '，已纠错 ' + rec.correctionChanged + ' 处' : '') + '）</summary>' +
-    '<p class="verify" style="margin:0 0 8px">划线处是纠错前的原话；有音频时点时间戳可跳转试听。</p>' +
+    (rec.correctionChanged ? '，已纠错 ' + rec.correctionChanged + ' 处' : '') +
+    (gated ? '，静音闸门丢 ' + gated + ' 段' : '') + '）</summary>' +
+    '<p class="verify" style="margin:0 0 8px">划线处是纠错前的原话；' +
+    (gated ? '划掉的段是静音闸门判定为「无中生有」的内容，不会进入纪要；' : '') +
+    '有音频时点时间戳可跳转试听。</p>' +
     rows + '</details>';
 }
 

@@ -15,6 +15,7 @@ import { fileURLToPath } from 'node:url';
 import { config } from './config.mjs';
 // D3-b：转写一结束就自动跑一遍确定性纠错（"计效→绩效"这类系统性错字）
 import { correctTranscriptFile } from './correct.mjs';
+import { gateTranscriptFile } from './gate.mjs';
 
 const SCRIPT_PATH = fileURLToPath(new URL('./asr/transcribe.py', import.meta.url));
 const TRANSCRIPT_DIR = path.join(config.dataDir, 'transcripts');
@@ -88,6 +89,18 @@ export function createTranscriber() {
       t.elapsedSeconds = ev.elapsedSeconds;
       t.rtf = ev.rtf;
       t.language = ev.language;
+      // D3-c：静音段幻觉闸门 —— 先过闸，再纠错。
+      // 顺序不能反：闸门要判「原始转写」，纠错会改写文本（而闸门的提示词回声判据
+      // 恰恰依赖模型吐出的原句），先纠错再判会漏。
+      // 闸门失败只记日志，绝不推翻「转写已成功」这个事实。
+      try {
+        const g = gateTranscriptFile(t.hash, { transcriptDir: TRANSCRIPT_DIR });
+        t.gate = { dropped: g.dropped, total: g.total, reasons: g.reasons };
+        console.log(`闸门 ${t.hash}：丢弃 ${g.dropped}/${g.total} 段`, g.reasons);
+      } catch (err) {
+        console.error('[gate] 闸门失败（转写结果本身仍然有效）：', err.message);
+        t.gate = { error: err.message };
+      }
       // D3-b：转写完成后立刻做确定性纠错。
       // 为什么搭在这里而不是独立一步：纠错是纯字符串处理（毫秒级），转写是最贵的一步（分钟级）——
       // 让纠错搭转写的顺风车，用户不用多等一次。词表改了可以用 POST /api/correct 单独重跑。

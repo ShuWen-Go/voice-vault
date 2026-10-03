@@ -41,6 +41,51 @@ def log(msg):
     sys.stderr.flush()
 
 
+def rms_profile(path, bucket=1.0, sr=16000):
+    """
+    逐秒 RMS 能量曲线（用于「静音段幻觉」的判据）。
+
+    为什么单独算一遍：Whisper 的 VAD 在「低电平环境噪声」上会把它当成人声，
+    于是模型在近乎无声的段落里凭空造句子（实测会原样背出 initial_prompt）。
+    能量是最便宜的旁证 —— 单独一次解码，38 分钟只用 ~3 秒。
+
+    返回 (逐秒 RMS 列表, p50, p90)；任何异常都返回 (None, None, None)，
+    不影响主流程（闸门拿不到数据就不启用，而不是把转写搞挂）。
+    """
+    try:
+        import av
+        import numpy as np
+
+        step = int(bucket * sr)
+        vals, cur, cnt = [], 0.0, 0
+        container = av.open(path)
+        stream = container.streams.audio[0]
+        resampler = av.AudioResampler(format="s16", layout="mono", rate=sr)
+        for frame in container.decode(stream):
+            for f in resampler.resample(frame):
+                a = np.frombuffer(bytes(f.planes[0]), dtype=np.int16).astype(np.float32)
+                i = 0
+                while i < a.size:
+                    take = min(step - cnt, a.size - i)
+                    chunk = a[i : i + take]
+                    cur += float((chunk * chunk).sum())
+                    cnt += take
+                    i += take
+                    if cnt >= step:
+                        vals.append((cur / step) ** 0.5)
+                        cur, cnt = 0.0, 0
+        if cnt:
+            vals.append((cur / cnt) ** 0.5)
+        container.close()
+        if not vals:
+            return None, None, None
+        arr = np.asarray(vals, dtype=np.float64)
+        return vals, float(np.median(arr)), float(np.percentile(arr, 90))
+    except Exception as e:  # noqa: BLE001 —— 辅助判据，失败就降级
+        log("能量曲线计算失败（不影响转写）：%s" % e)
+        return None, None, None
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--audio", required=True, help="音频文件路径")
@@ -78,6 +123,11 @@ def main():
 
     emit({"type": "stage", "stage": "transcribing", "loadSeconds": load_s})
 
+    # 逐秒能量曲线：只作为「静音段幻觉」闸门的旁证（见 rms_profile 的说明）
+    rms_vals, rms_p50, rms_p90 = rms_profile(args.audio)
+    if rms_p50:
+        log("能量曲线：p50=%.0f p90=%.0f（共 %d 秒）" % (rms_p50, rms_p90, len(rms_vals)))
+
     # 中文简繁不稳定：同一个模型、同样设了 language=zh，有的录音全出简体、有的全出繁体。
     # Whisper 官方推荐用 initial_prompt 给一句「同语言的引导」来稳定输出风格 —— 实测有效。
     hint = "以下是一段普通话会议录音的转写。" if args.language not in ("", "auto") else None
@@ -97,11 +147,37 @@ def main():
     total = float(info.duration or 0)
     segs = []
     last_report = 0.0
+    # 耗时统计要剔除「时间空洞」：笔记本休眠 / 进程被挂起 时，wall-clock 会猛涨，
+    # 上一轮实测就因此报出 RTF 15.45（真实值应是 0.4~0.6）。
+    # 判据：相邻两次循环间隔超过 60 秒 ⇒ 认定这段不是计算时间，单列出来。
+    gap_seconds = 0.0
+    prev_tick = time.time()
     try:
         # 真正的转写发生在这个循环里：generator 边算边给，所以能报进度
         for seg in seg_iter:
+            now = time.time()
+            gap = now - prev_tick
+            if gap > 60.0:
+                gap_seconds += gap
+                log("检测到 %.0f 秒时间空洞（机器休眠/挂起），已从耗时中剔除" % gap)
+            prev_tick = now
             text = seg.text.strip()
-            segs.append({"start": round(seg.start, 2), "end": round(seg.end, 2), "text": text})
+            item = {
+                "start": round(seg.start, 2),
+                "end": round(seg.end, 2),
+                "text": text,
+                # 判据随段落盘 —— 闸门（可重跑）和事后标定都要用，
+                # 而这些值只有转写时才有，丢了就得重转（转写是最贵的一步）
+                "noSpeech": round(float(getattr(seg, "no_speech_prob", 0.0) or 0.0), 3),
+                "logprob": round(float(getattr(seg, "avg_logprob", 0.0) or 0.0), 3),
+            }
+            if rms_vals:
+                i0 = max(0, int(seg.start))
+                i1 = min(len(rms_vals), max(i0 + 1, int(seg.end + 0.999)))
+                chunk = rms_vals[i0:i1]
+                if chunk:
+                    item["rms"] = round(sum(chunk) / len(chunk))
+            segs.append(item)
             now = time.time()
             # 节流：最快每秒报一次，避免刷爆管道
             if now - last_report >= 1.0:
@@ -118,7 +194,7 @@ def main():
         emit({"type": "error", "message": "转写中断：" + str(e)})
         return 6
 
-    elapsed = round(time.time() - t1, 1)
+    elapsed = round(time.time() - t1 - gap_seconds, 1)
     full_text = "".join(s["text"] for s in segs)
 
     result = {
@@ -129,9 +205,14 @@ def main():
         "durationSeconds": round(total, 2),
         "loadSeconds": load_s,
         "elapsedSeconds": elapsed,
+        # 被剔除的时间空洞（休眠 / 挂起），便于判断"这么慢到底是不是机器的问题"
+        "suspendedSeconds": round(gap_seconds, 1),
         "rtf": round(elapsed / total, 3) if total else None,
         "segmentCount": len(segs),
         "charCount": len(full_text),
+        # 能量基准（闸门按「相对基准」判断，不写死绝对阈值 ⇒ 换设备/换场地不用重调）
+        "rmsP50": rms_p50,
+        "rmsP90": rms_p90,
         "text": full_text,
         "segments": segs,
         "createdAt": time.strftime("%Y-%m-%dT%H:%M:%S"),

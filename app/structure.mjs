@@ -71,8 +71,11 @@ export function parseTs(at) {
 }
 
 // 把纠错后的段拼成「带时间戳的文本」——时间戳是 LLM 给出 at 的唯一合法来源
+// ⚠️ 已被静音闸门判定为幻觉的段一律不喂给模型：
+//    编造的句子一旦进了 prompt，就会被"归纳"进纪要，而且看不出是假的。
 export function buildTimestampedText(segments) {
   return (segments ?? [])
+    .filter((s) => !s?.gate?.drop)
     .map((s) => `[${fmtTs(s.start)}] ${s.text}`)
     .join('\n');
 }
@@ -234,7 +237,9 @@ export function verifyEntities(note, { segments = [], text = '', duration = 0 } 
 export async function structureMeeting(input, { apiKey, maxTokens = 8000 } = {}) {
   if (!apiKey) throw new Error('未提供 DeepSeek apiKey');
 
-  const body = buildTimestampedText(input.segments);
+  // 只把「通过闸门的段」送进模型（buildTimestampedText 也会再过滤一次，双保险）
+  const fed = (input.segments ?? []).filter((s) => !s?.gate?.drop);
+  const body = buildTimestampedText(fed);
   const minutes = (Number(input.duration || 0) / 60).toFixed(1);
 
   const userPrompt = `会议音频时长：${minutes} 分钟
@@ -289,9 +294,10 @@ ${body}`;
   }
 
   // 内容层：核验实体（能核的核，不能核的如实标记）
+  // 核验基准也用「过闸门后的段」—— 若 at 指向一个已被丢弃的静音段，就该判为可疑
   const verify = verifyEntities(checked.value, {
-    segments: input.segments,
-    text: input.text || (input.segments ?? []).map((s) => s.text).join(''),
+    segments: fed,
+    text: input.text || fed.map((s) => s.text).join(''),
     duration: input.duration || 0,
   });
 

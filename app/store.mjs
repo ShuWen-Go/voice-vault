@@ -64,6 +64,7 @@ export function createStore() {
       durationSeconds: tr?.durationSeconds ?? null,
       segmentCount: tr?.segmentCount ?? null,
       correctionChanged: tr?.correctionChanged ?? null,
+      gateDropped: tr?.gate?.droppedCount ?? null,
       meetingType: n?.meetingType ?? null,
       title: n?.title ?? null,
       summary: n?.summary ?? null,
